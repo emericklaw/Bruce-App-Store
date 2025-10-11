@@ -3,6 +3,9 @@
   "description": "App store for Bruce devices with over-the-air install and updates for scripts and themes",
   "category": "Tools",
   "files": [
-    "AppStore.js"
+    {
+      "source": "AppStore.js",
+      "destination": "AppStore.js"
+    }
   ]
 }
