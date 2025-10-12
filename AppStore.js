@@ -1,54 +1,40 @@
-// Import required modules for display, keyboard, file system, and WiFi functionality
 var display = require("display");
 var keyboard = require("keyboard");
 var storage = require("storage");
 var wifi = require("wifi");
 
-// Define color palette for the OTA installer
+// Color palette
 var colours = [
-    display.color(0, 0, 0),       // black - background
-    display.color(127, 127, 127), // grey - UI text
-    display.color(255, 255, 255), // white - values
-    display.color(0, 255, 0),     // green - success
-    display.color(255, 255, 0),   // yellow - warning
-    display.color(255, 165, 0),   // orange - info
-    display.color(255, 0, 0),     // red - error
-    display.color(0, 255, 255),   // cyan - downloading
+    display.color(0, 0, 0),       // 0: black
+    display.color(127, 127, 127), // 1: grey
+    display.color(255, 255, 255), // 2: white
+    display.color(0, 255, 0),     // 3: green
+    display.color(255, 255, 0),   // 4: yellow
+    display.color(255, 165, 0),   // 5: orange
+    display.color(255, 0, 0),     // 6: red
+    display.color(0, 255, 255),   // 7: cyan
 ];
 
-// Configuration
+// Configuration constants
 var BASE_URL = "http://ghp.iceis.co.uk/";
 var RELEASES_URL = BASE_URL + "service/main/filename/releases.json";
-var SCRIPTS_DIR = "/scripts/";
-var THEMES_DIR = "/Themes/";
+var SCRIPTS_DIR = "/scripts/", THEMES_DIR = "/Themes/";
 var VERSION_FILE = "/BruceAppStore/installed.json";
 
-// Available scripts for installation (loaded from remote releases.json)
-var availableCategories = [];   // Categories from releases.json
-var availableScripts = [];     // Scripts in current category
-var releasesData = {};         // Full releases data from JSON
-var isLoadingScripts = true;
-var currentView = "categories"; // "categories" or "scripts"
-var selectedCategory = "";      // Currently selected category
+// Data storage
+var availableCategories = [], availableScripts = [], releasesData = {}, installedVersions = {};
 
-// Application state variables
-var currentScript = 0;     // Currently selected script or category
-var exitApp = false;       // Controls main application loop
-var isDownloading = false; // Track download status
-var statusMessage = "";    // Status message to display
-var installedVersions = {}; // Track installed script versions
-var statusClearTime = 0;    // Time when to clear status message
-var descriptionScrollOffset = 0; // Offset for scrolling long descriptions
-var lastScrollTime = 0;     // Time tracking for scroll animation
-var showMenu = false;       // Whether to show the action menu
-var selectedMenuOption = 0; // Currently selected menu option
-var menuOptions = [];       // Available menu options for current script
-var fileSystem = "littlefs"; // Default file system (will be determined at startup)
+// Application state
+var currentScript = 0, lastCategoryIndex = 0, selectedMenuOption = 0;
+var currentView = "categories", selectedCategory = "";
+var exitApp = false, isLoadingScripts = true, isDownloading = false, showMenu = false;
+var statusMessage = "", statusClearTime = 0;
+var descriptionScrollOffset = 0, lastScrollTime = 0;
+var menuOptions = [], fileSystem = "littlefs";
 
-// Get display dimensions for responsive layout
-var displayWidth = display.width();
-var displayHeight = display.height();
-var fontScale = (displayWidth > 300 ? 1 : 0);
+// Display configuration
+var displayWidth = display.width(), displayHeight = display.height();
+var fontScale = displayWidth > 300 ? 1 : 0;
 var maxCharacters = Math.trunc(displayWidth / (6 * (fontScale + 1)));
 
 /**
@@ -56,38 +42,26 @@ var maxCharacters = Math.trunc(displayWidth / (6 * (fontScale + 1)));
  */
 function detectFileSystem() {
     try {
-        // Try to read bruce.conf from SD card first
         var confData = storage.read({ fs: "sd", path: "/bruce.conf" });
-        if (confData) {
-            fileSystem = "sd";
-            return;
-        }
+        fileSystem = confData ? "sd" : "littlefs";
     } catch (e) {
         fileSystem = "littlefs";
     }
 }
 
 /**
- * Clear status message after a delay (replaces setTimeout)
+ * Clear status message after a delay
  */
 function clearStatusAfterDelay() {
-    statusClearTime = now() + 3000; // Clear after 3 seconds
+    statusClearTime = now() + 3000;
 }
 
 /**
- * Clear status message after a shorter delay
- */
-function clearStatusAfterShortDelay() {
-    statusClearTime = now() + 2000; // Clear after 2 seconds
-}
-
-/**
- * Check if status message should be cleared
+ * Check and clear status message if time expired
  */
 function checkStatusClear() {
     if (statusClearTime > 0 && now() >= statusClearTime) {
-        statusMessage = "";
-        statusClearTime = 0;
+        statusMessage = statusClearTime = "";
         displayInterface();
     }
 }
@@ -96,21 +70,18 @@ function checkStatusClear() {
  * Update description scrolling for long text
  */
 function updateDescriptionScroll() {
-    if (statusMessage || showMenu || currentView !== "scripts") return; // Don't scroll if not in script view
-    var currentTime = now();
-    if (currentTime - lastScrollTime > 100) { // Update every 100ms
-        lastScrollTime = currentTime;
-        if (availableScripts.length > 0 && !isLoadingScripts && !isDownloading) {
-            var script = availableScripts[currentScript];
-            if (script.description.length > maxCharacters) {
-                descriptionScrollOffset++;
-                if (descriptionScrollOffset > script.description.length + 10) {
-                    descriptionScrollOffset = 0; // Reset scroll
-                }
-                // Only update the description area, not the whole screen
-                updateDescriptionArea(script);
-            }
-        }
+    if (statusMessage || showMenu || currentView !== "scripts" ||
+        availableScripts.length === 0 || isLoadingScripts || isDownloading ||
+        now() - lastScrollTime <= 100) {
+        return;
+    }
+
+    lastScrollTime = now();
+    var script = availableScripts[currentScript];
+
+    if (script.description.length > maxCharacters) {
+        descriptionScrollOffset = ++descriptionScrollOffset > script.description.length + 10 ? 0 : descriptionScrollOffset;
+        updateDescriptionArea(script);
     }
 }
 
@@ -118,21 +89,19 @@ function updateDescriptionScroll() {
  * Update only the description area to prevent screen flashing
  */
 function updateDescriptionArea(script) {
-    // Clear only the description area
     var descY = displayHeight / 10 * 6 + ((fontScale + 1) * 3) - 3;
-    display.drawFillRect(0, descY - 10, displayWidth, 20, colours[0]); // Clear description line
 
-    // Redraw the scrolling description
+    // Clear and setup display
+    display.drawFillRect(0, descY - 10, displayWidth, 20, colours[0]);
     display.setTextSize(1 + fontScale);
     display.setTextColor(colours[2]);
     display.setTextAlign('center', 'middle');
 
-    var displayText = script.description + "    "; // Add padding
-    var startPos = descriptionScrollOffset % displayText.length;
-    var scrolledText = displayText.substring(startPos) + displayText.substring(0, startPos);
-    var visibleText = scrolledText.substring(0, maxCharacters);
-    display.setTextAlign('center', 'middle');
-    display.drawText(visibleText, displayWidth / 2, descY);
+    // Create and display scrolling text
+    var paddedText = script.description + "    ";
+    var startPos = descriptionScrollOffset % paddedText.length;
+    display.drawText((paddedText + paddedText).substring(startPos, startPos + maxCharacters),
+        displayWidth / 2, descY);
 }
 
 /**
@@ -151,23 +120,16 @@ detectFileSystem();
 function showActionMenu(script) {
     showMenu = true;
     selectedMenuOption = 0;
-    menuOptions = [];
 
     var installedVersion = installedVersions[script.owner + '/' + script.repo + ':' + script.name];
+    var isInstalled = !!installedVersion;
+    var hasUpdate = isInstalled && installedVersion !== script.version;
 
-    if (!installedVersion) {
-        // Not installed
-        menuOptions.push("Install");
-    } else {
-        // Already installed
-        if (installedVersion !== script.version) {
-            menuOptions.push("Update");
-        }
-        menuOptions.push("Reinstall");
-        menuOptions.push("Delete");
-    }
+    menuOptions = isInstalled
+        ? (hasUpdate ? ["Update", "Reinstall", "Delete"] : ["Reinstall", "Delete"])
+        : ["Install"];
+
     menuOptions.push("Back");
-
     displayInterface();
 }
 
@@ -186,12 +148,10 @@ function executeMenuAction(script) {
     var action = menuOptions[selectedMenuOption];
     hideActionMenu();
 
-    if (action === "Install" || action === "Reinstall" || action === "Update") {
+    if (["Install", "Reinstall", "Update"].indexOf(action) !== -1) {
         installScript(script);
     } else if (action === "Delete") {
         deleteScript(script);
-    } else if (action === "Back") {
-
     }
 }
 
@@ -200,37 +160,21 @@ function executeMenuAction(script) {
  */
 function deleteScript(script) {
     try {
-        // Delete all files in the script's files array
-        var filesDeleted = 0;
-
-        // Download full metadata
         var fullMetadata = loadFullMetadata(script.metadata_file);
-
-        // Get the files array
         var files = fullMetadata.files || [];
-
-        var baseLocalDir = SCRIPTS_DIR;
-        if (script.category == 'Themes') {
-            baseLocalDir = THEMES_DIR;
-        }
-
+        var baseDir = (script.category === 'Themes') ? THEMES_DIR : SCRIPTS_DIR;
+        var deletedAny = false;
 
         for (var i = 0; i < files.length; i++) {
-            var file = files[i];
-            var scriptPath = file.destination;
+            var filePath = baseDir + files[i].destination.replace(/^\/+/, '');
+            console.log("Deleting: " + filePath);
 
-            var deleteFile = baseLocalDir + scriptPath.replace(/^\/+/, ''); // Ensure no leading slash
-
-            console.log("Deleting: " + deleteFile);
-
-            var deleteSuccess = storage.remove({ fs: fileSystem, path: deleteFile });
-            if (deleteSuccess) {
-                filesDeleted++;
+            if (storage.remove({ fs: fileSystem, path: filePath })) {
+                deletedAny = true;
             }
         }
 
-        if (filesDeleted > 0) {
-            // Remove from version tracking
+        if (deletedAny) {
             delete installedVersions[script.owner + '/' + script.repo + ':' + script.name];
             saveInstalledVersions();
             statusMessage = script.name + " deleted successfully!";
@@ -255,14 +199,13 @@ loadAvailableScripts();
 displayInterface();
 
 /**
- * Load available scripts from remote versions.json
+ * Load available scripts from remote releases.json
  */
 function loadAvailableScripts() {
     isLoadingScripts = true;
     displayInterface();
 
     try {
-        // Check WiFi connection first
         if (!wifi.connected()) {
             statusMessage = "WiFi not connected. Connect via WiFi menu first.";
             isLoadingScripts = false;
@@ -270,48 +213,28 @@ function loadAvailableScripts() {
             return;
         }
 
-        //statusMessage = "Fetching script list...";
-        displayInterface();
-
         var response = wifi.httpFetch(RELEASES_URL);
 
         if (response.status === 200) {
-            const clean = response.body
-                .replace(/^\uFEFF/, '')             // remove BOM if present
-                .replace(/[\u0000-\u001F\u007F-\u009F]/g, ''); // remove control chars
-            const parsedData = JSON.parse(clean);
+            var clean = response.body
+                .replace(/^\uFEFF/, '')
+                .replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+            var parsedData = JSON.parse(clean);
 
-            // Check if data is categorized or flat structure
-            if (Array.isArray(parsedData)) {
-                // Legacy flat structure - create a single "All Scripts" category
-                availableCategories = ["All Scripts"];
-                releasesData = { "All Scripts": parsedData };
-                currentView = "categories";
-            } else {
-                // New categorized structure - categories are direct properties
-                availableCategories = Object.keys(parsedData);
-                releasesData = parsedData;
-                currentView = "categories";
-            }
+            availableCategories = Object.keys(parsedData);
+            releasesData = parsedData;
 
-            // Store the full releases data for category navigation
-            releasesData = releasesData;
-
-            // Check for updates and create "Updates" category
+            currentView = "categories";
             createUpdatesCategory();
-
-            isLoadingScripts = false;
-            //statusMessage = "Scripts loaded successfully";
         } else {
-            isLoadingScripts = false;
             statusMessage = "Failed Loading Scripts (HTTP " + response.status + ")";
         }
 
     } catch (e) {
-        isLoadingScripts = false;
         statusMessage = "Network error: " + e.message;
     }
 
+    isLoadingScripts = false;
     displayInterface();
     clearStatusAfterDelay();
 }
@@ -320,18 +243,12 @@ function loadAvailableScripts() {
 function loadFullMetadata(metadataURL) {
     try {
         var response = wifi.httpFetch(BASE_URL + 'service/main/filename-last/' + metadataURL);
-
         if (response.status === 200) {
-            const clean = response.body
-                .replace(/^\uFEFF/, '')             // remove BOM if present
-                .replace(/[\u0000-\u001F\u007F-\u009F]/g, ''); // remove control chars
-            const parsedData = JSON.parse(clean);
-
-            return parsedData;
-        } else {
-            statusMessage = "Failed Loading Metadata (HTTP " + response.status + ")";
+            return JSON.parse(response.body
+                .replace(/^\uFEFF/, '')
+                .replace(/[\u0000-\u001F\u007F-\u009F]/g, ''));
         }
-
+        statusMessage = "Failed Loading Metadata (HTTP " + response.status + ")";
     } catch (e) {
         statusMessage = "Network error: " + e.message;
     }
@@ -343,11 +260,14 @@ function loadFullMetadata(metadataURL) {
 function loadInstalledVersions() {
     try {
         var versionData = storage.read({ fs: fileSystem, path: VERSION_FILE });
-        if (versionData) {
-            installedVersions = JSON.parse(versionData);
-        }
+        installedVersions = versionData ? JSON.parse(versionData) : {};
     } catch (e) {
         installedVersions = {};
+    }
+
+    if (!installedVersions["emericklaw/Bruce-App-Store:App Store"]) {
+        installedVersions["emericklaw/Bruce-App-Store:App Store"] = "0.0.0";
+        saveInstalledVersions();
     }
 }
 
@@ -357,9 +277,7 @@ function loadInstalledVersions() {
 function saveInstalledVersions() {
     try {
         storage.write({ fs: fileSystem, path: VERSION_FILE }, JSON.stringify(installedVersions, null, 2), 'write');
-
-        // Refresh Updates category after version changes
-        if (!isLoadingScripts && Object.keys(releasesData).length > 0) {
+        if (!isLoadingScripts && releasesData) {
             createUpdatesCategory();
         }
     } catch (e) {
@@ -372,7 +290,7 @@ function saveInstalledVersions() {
  */
 function needsUpdate(script) {
     var installedVersion = installedVersions[script.owner + '/' + script.repo + ':' + script.name];
-    return !installedVersion || installedVersion !== script.version;
+    return installedVersion !== script.version;
 }
 
 /**
@@ -380,33 +298,218 @@ function needsUpdate(script) {
  */
 function getScriptStatus(script) {
     var installedVersion = installedVersions[script.owner + '/' + script.repo + ':' + script.name];
-    if (!installedVersion) {
-        return { text: "NOT INSTALLED", color: colours[4] };
-    } else if (installedVersion !== script.version) {
-        return { text: "UPDATE AVAILABLE", color: colours[5] };
-    } else {
-        return { text: "UP TO DATE", color: colours[3] };
+    if (!installedVersion) return { text: "NOT INSTALLED", color: colours[4] };
+    if (installedVersion !== script.version) return { text: "UPDATE AVAILABLE", color: colours[5] };
+    return { text: "UP TO DATE", color: colours[3] };
+}
+
+/**
+ * Helper function to split text into lines that fit within maxCharacters
+ */
+function splitTextIntoLines(text) {
+    if (text.length <= maxCharacters) return [text];
+
+    var lines = [], words = text.split(' '), currentLine = '';
+
+    for (var i = 0; i < words.length; i++) {
+        var testLine = currentLine + (currentLine.length > 0 ? ' ' : '') + words[i];
+        if (testLine.length <= maxCharacters) {
+            currentLine = testLine;
+        } else {
+            if (currentLine.length > 0) {
+                lines.push(currentLine);
+                currentLine = words[i];
+            } else {
+                lines.push(words[i]);
+            }
+        }
+    }
+    if (currentLine.length > 0) lines.push(currentLine);
+    return lines;
+}
+
+/**
+ * Draw status message with background box
+ */
+function drawStatusMessage() {
+    if (!statusMessage || isDownloading || isLoadingScripts) return;
+
+    display.setTextSize(1 + fontScale);
+    display.setTextColor(colours[5]);
+    display.setTextAlign('center', 'middle');
+
+    var lines = splitTextIntoLines(statusMessage);
+    var boxHeight = lines.length * (fontScale + 1) * 8 + 20;
+    var boxWidth = Math.min(displayWidth - 20, 250);
+    var boxX = (displayWidth - boxWidth) / 2;
+    var boxY = displayHeight / 2 - boxHeight / 2;
+
+    // Draw box background and border
+    display.drawFillRect(boxX, boxY, boxWidth, boxHeight, colours[0]);
+    display.drawRect(boxX, boxY, boxWidth, boxHeight, colours[5]);
+
+    // Draw text lines
+    for (var i = 0; i < lines.length; i++) {
+        var textY = boxY + 18 + (i * (fontScale + 1) * 8);
+        display.drawText(lines[i], displayWidth / 2, textY);
     }
 }
 
 /**
- * Display the OTA installer interface
+ * Draw action menu
+ */
+function drawActionMenu() {
+    if (!showMenu || availableScripts.length === 0) return;
+
+    var menuHeight = menuOptions.length * 16 + 24;
+    var menuWidth = Math.min(displayWidth - 40, 200);
+    var menuX = (displayWidth - menuWidth) / 2;
+    var menuY = (displayHeight - menuHeight) / 2;
+
+    // Draw menu background and border
+    display.drawFillRect(menuX, menuY, menuWidth, menuHeight, colours[0]);
+    display.drawRect(menuX, menuY, menuWidth, menuHeight, colours[2]);
+
+    // Draw menu options
+    display.setTextSize(1 + fontScale);
+    for (var k = 0; k < menuOptions.length; k++) {
+        var optionY = menuY + 16 + (k * (fontScale + 1) * 10);
+        var optionColor = (k === selectedMenuOption) ? colours[3] : colours[1];
+        var prefix = (k === selectedMenuOption) ? "> " : "  ";
+
+        display.setTextColor(optionColor);
+        display.setTextAlign('left', 'middle');
+        display.drawText(prefix + menuOptions[k], menuX + 10, optionY);
+    }
+}
+
+/**
+ * Draw category view
+ */
+function drawCategoryView() {
+    if (availableCategories.length === 0) {
+        display.setTextSize(1 + fontScale);
+        display.setTextColor(colours[6]);
+        display.drawText("No categories available", displayWidth / 2, displayHeight / 2 - 10);
+        display.setTextColor(colours[2]);
+        display.drawText("Check network connection", displayWidth / 2, displayHeight / 2 + 10);
+        return;
+    }
+
+    if (showMenu) return;
+
+    var categoryName = availableCategories[currentScript];
+    var categoryScripts = releasesData[categoryName] || [];
+
+    // Display current category info
+    display.setTextSize(1 + fontScale);
+    display.setTextColor(colours[2]);
+    display.drawText((currentScript + 1) + " of " + availableCategories.length,
+        displayWidth / 2, displayHeight / 10 * 2);
+
+    // Category name with special styling for Updates
+    display.setTextSize(2 + fontScale);
+    display.setTextColor(categoryName === "Updates" ? colours[5] : colours[3]);
+    var nameText = categoryName === "Updates" ? "* " + categoryName + " *" : categoryName;
+    display.drawText(nameText, displayWidth / 2, displayHeight / 10 * 3 + 7);
+
+    // Category description
+    display.setTextSize(1 + fontScale);
+    display.setTextColor(colours[2]);
+    var descText = categoryName === "Updates"
+        ? categoryScripts.length + " update" + (categoryScripts.length === 1 ? "" : "s") + " available"
+        : categoryScripts.length + " available";
+    display.drawText(descText, displayWidth / 2, displayHeight / 2);
+
+    // Instructions
+    display.setTextColor(colours[1]);
+    display.drawText("Press Select to browse", displayWidth / 2, displayHeight / 10 * 7 - 10);
+    display.drawText("category", displayWidth / 2, displayHeight / 10 * 8 - 10);
+}
+
+/**
+ * Draw script view
+ */
+function drawScriptView() {
+    if (availableScripts.length === 0) {
+        display.setTextSize(1 + fontScale);
+        display.setTextColor(colours[6]);
+        display.drawText("No apps in category", displayWidth / 2, displayHeight / 2 - 10);
+        display.setTextColor(colours[2]);
+        display.drawText("Press ESC to go back", displayWidth / 2, displayHeight / 2 + 10);
+        return;
+    }
+
+    if (showMenu) return;
+
+    var script = availableScripts[currentScript];
+    var status = getScriptStatus(script);
+
+    // Show category name
+    if (selectedCategory) {
+        display.setTextColor(colours[3]);
+        display.setTextSize(1 + fontScale);
+        display.drawText(selectedCategory, displayWidth / 2, displayHeight / 10 * 2);
+    }
+
+    // Display current script info
+    display.setTextSize(1 + fontScale);
+    display.setTextColor(colours[2]);
+    display.drawText((currentScript + 1) + " of " + availableScripts.length,
+        displayWidth / 2, displayHeight / 10 * 3);
+
+    // Script name
+    display.setTextSize(2 + fontScale);
+    display.setTextColor(colours[3]);
+    display.drawText(script.name, displayWidth / 2, displayHeight / 10 * 5 - 5);
+
+    // Script description (with scrolling support)
+    display.setTextSize(1 + fontScale);
+    display.setTextColor(colours[2]);
+    var descY = displayHeight / 10 * 6 + ((fontScale + 1) * 3) - 3;
+
+    if (script.description.length > maxCharacters) {
+        var displayText = script.description + "    ";
+        var startPos = descriptionScrollOffset % displayText.length;
+        var scrolledText = displayText.substring(startPos) + displayText.substring(0, startPos);
+        var visibleText = scrolledText.substring(0, maxCharacters);
+        display.setTextAlign('left', 'middle');
+        display.drawText(visibleText, 0, descY);
+    } else {
+        display.setTextAlign('center', 'middle');
+        display.drawText(script.description, displayWidth / 2, descY);
+    }
+
+    // Status and version info
+    display.setTextAlign('center', 'middle');
+    display.setTextColor(status.color);
+    display.drawText(status.text, displayWidth / 2, displayHeight / 10 * 8 - ((fontScale + 1) * 3));
+
+    display.setTextColor(colours[1]);
+    if (script.version !== 'UNKNOWN') {
+        var installedVer = installedVersions[script.owner + '/' + script.repo + ':' + script.name] || "None";
+        display.drawText("Available: " + script.version,
+            displayWidth / 2, displayHeight / 10 * 9 - ((fontScale + 1) * 3));
+        if (installedVer !== 'None') {
+            display.drawText("Installed: " + installedVer,
+                displayWidth / 2, displayHeight / 10 * 10 - ((fontScale + 1) * 3));
+        }
+    }
+}
+
+/**
+ * Display the App Store interface
  */
 function displayInterface() {
-
     if (!showMenu) {
-        // Clear screen with black background
         display.fill(colours[0]);
         display.setTextAlign('center', 'middle');
-
-        // Display app title
         display.setTextSize(2 + fontScale);
         display.setTextColor(BRUCE_PRICOLOR);
         display.drawText("Bruce App Store", displayWidth / 2, 7 + fontScale * 5);
     }
 
     if (isLoadingScripts) {
-        // Show loading screen
         display.setTextSize(1 + fontScale);
         display.setTextColor(colours[7]);
         display.drawText("Loading...", displayWidth / 2, displayHeight / 2 - 10);
@@ -416,206 +519,26 @@ function displayInterface() {
     }
 
     if (isDownloading) {
-        // Show downloading screen
         display.setTextSize(1 + fontScale);
         display.setTextColor(colours[7]);
         display.drawText("Downloading...", displayWidth / 2, displayHeight / 2 - 20);
-
-        // Clear area behind status message and draw it
-        display.drawFillRect(0, displayHeight / 2 + 10, displayWidth, 20, colours[0]); // Clear status area
+        display.drawFillRect(0, displayHeight / 2 + 10, displayWidth, 20, colours[0]);
         display.setTextColor(colours[2]);
         display.drawText(statusMessage, displayWidth / 2, displayHeight / 2 + 20);
-    } else if (currentView === "categories") {
-        // Show category selection
-        if (availableCategories.length === 0) {
-            display.setTextSize(1 + fontScale);
-            display.setTextColor(colours[6]);
-            display.drawText("No categories available", displayWidth / 2, displayHeight / 2 - 10);
-            display.setTextColor(colours[2]);
-            display.drawText("Check network connection", displayWidth / 2, displayHeight / 2 + 10);
-        } else if (!showMenu) {
-            // Display current category info
-            display.setTextSize(1 + fontScale);
-            display.setTextColor(colours[2]);
-            display.drawText((currentScript + 1) + " of " + availableCategories.length,
-                displayWidth / 2, displayHeight / 10 * 2);
-
-            // Category name
-            display.setTextSize(2 + fontScale);
-            display.setTextColor(colours[3]);
-            var categoryName = availableCategories[currentScript];
-
-            // Special styling for Updates category
-            if (categoryName === "Updates") {
-                display.setTextColor(colours[5]); // Orange for updates
-                display.drawText("* " + categoryName + " *", displayWidth / 2, displayHeight / 10 * 3 + 7);
-            } else {
-                display.setTextColor(colours[3]); // Green for regular categories
-                display.drawText(categoryName, displayWidth / 2, displayHeight / 10 * 3 + 7);
-            }
-
-            // Category description/info
-            display.setTextSize(1 + fontScale);
-            display.setTextColor(colours[2]);
-            var categoryScripts = releasesData[categoryName] || [];
-
-            if (categoryName === "Updates") {
-                var updateText = categoryScripts.length + " update" + (categoryScripts.length === 1 ? "" : "s") + " available";
-                display.drawText(updateText, displayWidth / 2, displayHeight / 2);
-            } else {
-                display.drawText(categoryScripts.length + " available", displayWidth / 2, displayHeight / 2);
-            }
-
-            // Instructions
-            display.setTextColor(colours[1]);
-            display.drawText("Press Select to browse", displayWidth / 2, displayHeight / 10 * 7 - 10);
-            display.drawText("category", displayWidth / 2, displayHeight / 10 * 8 - 10);
-        }
-    } else if (availableScripts.length === 0) {
-        // Show error if no scripts loaded in current category
-        display.setTextSize(1 + fontScale);
-        display.setTextColor(colours[6]);
-        display.drawText("No apps in category", displayWidth / 2, displayHeight / 2 - 10);
-        display.setTextColor(colours[2]);
-        display.drawText("Press ESC to go back", displayWidth / 2, displayHeight / 2 + 10);
-    } else if (!showMenu) {
-        // Show script list
-        var script = availableScripts[currentScript];
-        var status = getScriptStatus(script);
-
-        // Show category name
-        if (selectedCategory) {
-            display.setTextColor(colours[3]);
-            display.setTextSize(1 + fontScale);
-            display.drawText(selectedCategory, displayWidth / 2, displayHeight / 10 * 2);
-        }
-
-        // Display current script info
-        display.setTextSize(1 + fontScale);
-        display.setTextColor(colours[2]);
-        display.drawText((currentScript + 1) + " of " + availableScripts.length,
-            displayWidth / 2, displayHeight / 10 * 3);
-
-        // Script name
-        display.setTextSize(2 + fontScale);
-        display.setTextColor(colours[3]);
-        display.drawText(script.name, displayWidth / 2, displayHeight / 10 * 5 - 5);
-
-        // Script description
-        display.setTextSize(1 + fontScale);
-        display.setTextColor(colours[2]);
-
-        // Handle scrolling for long descriptions
-        if (script.description.length > maxCharacters) {
-            var displayText = script.description + "    "; // Add padding
-            var startPos = descriptionScrollOffset % displayText.length;
-            var scrolledText = displayText.substring(startPos) + displayText.substring(0, startPos);
-            var visibleText = scrolledText.substring(0, maxCharacters);
-
-            display.setTextAlign('left', 'middle');
-            display.drawText(visibleText, 0, displayHeight / 10 * 6 + ((fontScale + 1) * 3) - 3);
-        } else {
-            display.setTextAlign('center', 'middle');
-            display.drawText(script.description, displayWidth / 2, displayHeight / 10 * 6 + ((fontScale + 1) * 3) - 3);
-        }
-
-        // Status
-        display.setTextAlign('center', 'middle');
-        display.setTextColor(status.color);
-        display.drawText(status.text, displayWidth / 2, displayHeight / 10 * 8 - ((fontScale + 1) * 3));
-
-        // Version info
-        display.setTextColor(colours[1]);
-        if (script.version != 'UNKNOWN') {
-            var installedVer = installedVersions[script.owner + '/' + script.repo + ':' + script.name] || "None";
-            display.drawText("Available: " + script.version,
-                displayWidth / 2, displayHeight / 10 * 9 - ((fontScale + 1) * 3));
-            if (installedVer != 'None') {
-                display.drawText("Installed: " + installedVer,
-                    displayWidth / 2, displayHeight / 10 * 10 - ((fontScale + 1) * 3));
-            }
-        }
+        return;
     }
 
-    // Status message
-    if (statusMessage && !isDownloading && !isLoadingScripts) {
-        display.setTextSize(1 + fontScale);
-        display.setTextColor(colours[5]);
-        display.setTextAlign('center', 'middle');
-
-        // Split message if longer than maxCharacters characters
-        var lines = [];
-        if (statusMessage.length > maxCharacters) {
-            var words = statusMessage.split(' ');
-            var currentLine = '';
-
-            for (var i = 0; i < words.length; i++) {
-                var testLine = currentLine + (currentLine.length > 0 ? ' ' : '') + words[i];
-                if (testLine.length <= maxCharacters) {
-                    currentLine = testLine;
-                } else {
-                    if (currentLine.length > 0) {
-                        lines.push(currentLine);
-                        currentLine = words[i];
-                    } else {
-                        // Single word longer than maxCharacters chars, just add it
-                        lines.push(words[i]);
-                    }
-                }
-            }
-            if (currentLine.length > 0) {
-                lines.push(currentLine);
-            }
-        } else {
-            lines.push(statusMessage);
-        }
-
-        // Calculate box dimensions
-        var boxHeight = lines.length * (fontScale + 1) * 8 + 20; // 10px padding + line spacing
-        var boxWidth = Math.min(displayWidth - 20, 250); // Max width with margins
-        var boxX = (displayWidth - boxWidth) / 2;
-        var boxY = displayHeight / 2 - boxHeight / 2;
-
-        // Draw box background and border
-        display.drawFillRect(boxX, boxY, boxWidth, boxHeight, colours[0]); // Background
-        display.drawRect(boxX, boxY, boxWidth, boxHeight, colours[5]); // Border
-
-        // Draw each line of text
-        for (var j = 0; j < lines.length; j++) {
-            var textY = boxY + 10 + 8 + (j * (fontScale + 1) * 8); // 10px top padding + line spacing
-            display.drawText(lines[j], displayWidth / 2, textY);
-        }
+    if (currentView === "categories") {
+        drawCategoryView();
+    } else {
+        drawScriptView();
     }
 
-    // Action menu
-    if (showMenu && availableScripts.length > 0) {
-        var script = availableScripts[currentScript];
-
-        // Calculate menu dimensions
-        var menuHeight = menuOptions.length * 16 + 24; // 16px per option + padding
-        var menuWidth = Math.min(displayWidth - 40, 200);
-        var menuX = (displayWidth - menuWidth) / 2;
-        var menuY = (displayHeight - menuHeight) / 2;
-
-        // Draw menu background and border
-        display.drawFillRect(menuX, menuY, menuWidth, menuHeight, colours[0]);
-        display.drawRect(menuX, menuY, menuWidth, menuHeight, colours[2]);
-
-        // Draw menu options
-        display.setTextSize(1 + fontScale);
-        for (var k = 0; k < menuOptions.length; k++) {
-            var optionY = menuY + 16 + (k * (fontScale + 1) * 10);
-            var optionColor = (k === selectedMenuOption) ? colours[3] : colours[1];
-            var prefix = (k === selectedMenuOption) ? "> " : "  ";
-
-            display.setTextColor(optionColor);
-            display.setTextAlign('left', 'middle');
-            display.drawText(prefix + menuOptions[k], menuX + 10, optionY);
-        }
-    }
+    drawStatusMessage();
+    drawActionMenu();
 
     // Control instructions
-    if (!isDownloading && !isLoadingScripts && availableScripts.length == 0) {
+    if (!isDownloading && !isLoadingScripts && availableScripts.length === 0) {
         display.setTextSize(1 + fontScale);
         display.setTextColor(colours[1]);
         display.drawText("Back: Close App", displayWidth / 2, displayHeight - 15);
@@ -642,65 +565,48 @@ function installScript(script) {
         statusMessage = "Downloading " + script.name + "...";
         displayInterface();
 
-        // Download the script
-
         var success = 0;
         var errors = 0;
 
         // Download full metadata
         var fullMetadata = loadFullMetadata(script.metadata_file);
-
-        // Get the files array
         var files = fullMetadata.files;
+        var baseLocalDir = (script.category === 'Themes') ? THEMES_DIR : SCRIPTS_DIR;
 
         // Loop through the files
         for (var i = 0; i < files.length; i++) {
             var file = files[i];
-            var sourceFile = file.source;
-            var destPath = file.destination;
+            var destPath = baseLocalDir + file.destination.replace(/^\/+/, '');
 
-            var baseLocalDir = SCRIPTS_DIR;
-            if (script.category == 'Themes') {
-                baseLocalDir = THEMES_DIR;
-            }
-            console.log(destPath);
-            destPath = baseLocalDir + destPath.replace(/^\/+/, ''); // Ensure no leading slash
+            console.log("Downloading: " + file.source + " -> " + destPath);
 
-            console.log("Downloading: " + sourceFile + " -> " + destPath);
+            var url = script.version === 'UNKNOWN'
+                ? BASE_URL + 'service/manual/owner/' + script.owner + '/repository/' + script.repo + '/filename-last/' + file.source
+                : BASE_URL + 'service/release/owner/' + script.owner + '/repository/' + script.repo + '/tag/' + fullMetadata.tag + '/filename-last/' + file.source;
 
-            if (script.version === 'UNKNOWN') {
-                var url = BASE_URL + 'service/manual/owner/' + script.owner + '/repository/' + script.repo + '/filename-last/' + sourceFile;
-            } else {
-                var url = BASE_URL + 'service/release/owner/' + script.owner + '/repository/' + script.repo + '/tag/' + fullMetadata.tag + '/filename-last/' + sourceFile;
-            }
-            console.log(url);
             var response = wifi.httpFetch(url);
 
             if (response.status === 200) {
                 statusMessage = "Downloading " + (i + 1) + " of " + files.length + "...";
                 displayInterface();
 
-                // Write the file to destination path
-                var writeSuccess = storage.write({ fs: fileSystem, path: destPath }, response.body);
-
-                if (writeSuccess) {
+                if (storage.write({ fs: fileSystem, path: destPath }, response.body)) {
                     success++;
                 } else {
                     statusMessage = "Failed to write file: " + destPath;
                     errors++;
                 }
-
             } else {
                 errors++;
-                statusMessage = "Download failed: HTTP " + response.status + " for " + sourceFile;
+                statusMessage = "Download failed: HTTP " + response.status + " for " + file.source;
             }
-            if (success == files.length && !errors) {
-                // Update version tracking
-                installedVersions[script.owner + '/' + script.repo + ':' + script.name] = script.version;
-                saveInstalledVersions();
-                statusMessage = script.name + " installed successfully!";
-            }
+        }
 
+        // Check if all files were downloaded successfully
+        if (success === files.length && errors === 0) {
+            installedVersions[script.owner + '/' + script.repo + ':' + script.name] = script.version;
+            saveInstalledVersions();
+            statusMessage = script.name + " installed successfully!";
         }
 
     } catch (e) {
@@ -709,32 +615,6 @@ function installScript(script) {
 
     isDownloading = false;
     displayInterface();
-
-    // Clear status message after a delay
-    clearStatusAfterDelay();
-}
-
-/**
- * Check for updates for all scripts
- */
-function checkForUpdates() {
-    var updatesAvailable = 0;
-
-    for (var i = 0; i < availableScripts.length; i++) {
-        if (needsUpdate(availableScripts[i])) {
-            updatesAvailable++;
-        }
-    }
-
-    if (updatesAvailable > 0) {
-        statusMessage = updatesAvailable + " update(s) available";
-    } else {
-        statusMessage = "All scripts up to date";
-    }
-
-    displayInterface();
-
-    // Clear status message after a delay
     clearStatusAfterDelay();
 }
 
@@ -746,7 +626,7 @@ function createUpdatesCategory() {
 
     // Go through all categories and scripts to find apps with updates
     for (var categoryName in releasesData) {
-        if (categoryName === "Updates") continue; // Skip if Updates already exists
+        if (categoryName === "Updates") continue;
 
         var scripts = releasesData[categoryName];
         for (var i = 0; i < scripts.length; i++) {
@@ -760,23 +640,17 @@ function createUpdatesCategory() {
         }
     }
 
-    // If there are updates available, create/update the Updates category
+    // Remove existing Updates category
+    var updatesIndex = availableCategories.indexOf("Updates");
+    if (updatesIndex !== -1) {
+        availableCategories.splice(updatesIndex, 1);
+    }
+    delete releasesData["Updates"];
+
+    // Add Updates category if there are updates available
     if (updatesAvailable.length > 0) {
         releasesData["Updates"] = updatesAvailable;
-
-        // Add "Updates" to the beginning of categories list if not already there
-        if (availableCategories.indexOf("Updates") === -1) {
-            availableCategories.unshift("Updates");
-        }
-    } else {
-        // Remove Updates category if no updates are available
-        if (releasesData["Updates"]) {
-            delete releasesData["Updates"];
-            var updatesIndex = availableCategories.indexOf("Updates");
-            if (updatesIndex !== -1) {
-                availableCategories.splice(updatesIndex, 1);
-            }
-        }
+        availableCategories.unshift("Updates");
     }
 }
 
@@ -784,13 +658,14 @@ function createUpdatesCategory() {
  * Select a category and load its scripts
  */
 function selectCategory(categoryName) {
+    lastCategoryIndex = currentScript;
     selectedCategory = categoryName;
     currentView = "scripts";
+    currentScript = 0;
+    resetDescriptionScroll();
 
     if (releasesData[categoryName]) {
         availableScripts = releasesData[categoryName];
-        currentScript = 0; // Reset to first script
-        resetDescriptionScroll();
     } else {
         availableScripts = [];
         statusMessage = "Category not found: " + categoryName;
@@ -805,24 +680,34 @@ function selectCategory(categoryName) {
  */
 function goBackToCategories() {
     currentView = "categories";
-    currentScript = 0; // Reset selection to first category
+    currentScript = lastCategoryIndex;
     availableScripts = [];
     selectedCategory = "";
     resetDescriptionScroll();
     displayInterface();
 }
 
+// Helper function to handle navigation (next/prev) with wrapping
+function handleNavigation(isNext, maxLength, onUpdate) {
+    if (maxLength === 0) return;
+
+    currentScript = isNext
+        ? (currentScript + 1) % maxLength
+        : (currentScript - 1 + maxLength) % maxLength;
+
+    if (onUpdate) onUpdate();
+    displayInterface();
+}
+
 // Main application loop
 while (!exitApp) {
-    // Check for exit button press (only when not in menu)
+    // Handle ESC button
     if (keyboard.getEscPress()) {
         if (showMenu) {
             hideActionMenu();
         } else if (currentView === "scripts") {
-            // Go back to categories
             goBackToCategories();
         } else {
-            // Exit app
             exitApp = true;
             break;
         }
@@ -831,99 +716,39 @@ while (!exitApp) {
     if (!isDownloading) {
         if (showMenu) {
             // Handle menu navigation
-            if (keyboard.getNextPress()) {
-                selectedMenuOption++;
-                if (selectedMenuOption >= menuOptions.length) {
-                    selectedMenuOption = 0;
-                }
-                displayInterface();
-            }
-
-            if (keyboard.getPrevPress()) {
-                selectedMenuOption--;
-                if (selectedMenuOption < 0) {
-                    selectedMenuOption = menuOptions.length - 1;
-                }
+            if (keyboard.getNextPress() || keyboard.getPrevPress()) {
+                var isNext = keyboard.getNextPress();
+                selectedMenuOption = isNext
+                    ? (selectedMenuOption + 1) % menuOptions.length
+                    : (selectedMenuOption - 1 + menuOptions.length) % menuOptions.length;
                 displayInterface();
             }
 
             if (keyboard.getSelPress()) {
-                var script = availableScripts[currentScript];
-                executeMenuAction(script);
-            }
-
-            if (keyboard.getEscPress()) {
-                hideActionMenu();
-                // return; // Don't exit app, just close menu
+                executeMenuAction(availableScripts[currentScript]);
             }
         } else if (currentView === "categories") {
             // Handle category navigation
             if (keyboard.getNextPress()) {
-                if (availableCategories.length > 0) {
-                    currentScript++;
-                    if (currentScript >= availableCategories.length) {
-                        currentScript = 0;
-                    }
-                    displayInterface();
-                }
-            }
-
-            if (keyboard.getPrevPress()) {
-                if (availableCategories.length > 0) {
-                    currentScript--;
-                    if (currentScript < 0) {
-                        currentScript = availableCategories.length - 1;
-                    }
-                    displayInterface();
-                }
-            }
-
-            if (keyboard.getSelPress()) {
-                if (availableCategories.length > 0) {
-                    var categoryName = availableCategories[currentScript];
-                    selectCategory(categoryName);
-                }
+                handleNavigation(true, availableCategories.length);
+            } else if (keyboard.getPrevPress()) {
+                handleNavigation(false, availableCategories.length);
+            } else if (keyboard.getSelPress() && availableCategories.length > 0) {
+                selectCategory(availableCategories[currentScript]);
             }
         } else {
             // Handle script navigation
             if (keyboard.getNextPress()) {
-                if (availableScripts.length > 0) {
-                    currentScript++;
-                    if (currentScript >= availableScripts.length) {
-                        currentScript = 0;
-                    }
-                    resetDescriptionScroll();
-                    displayInterface();
-                }
-            }
-
-            if (keyboard.getPrevPress()) {
-                if (availableScripts.length > 0) {
-                    currentScript--;
-                    if (currentScript < 0) {
-                        currentScript = availableScripts.length - 1;
-                    }
-                    resetDescriptionScroll();
-                    displayInterface();
-                }
-            }
-
-            // Handle Select button press - show action menu
-            if (keyboard.getSelPress()) {
-                if (availableScripts.length > 0) {
-                    var script = availableScripts[currentScript];
-                    showActionMenu(script);
-                }
+                handleNavigation(true, availableScripts.length, resetDescriptionScroll);
+            } else if (keyboard.getPrevPress()) {
+                handleNavigation(false, availableScripts.length, resetDescriptionScroll);
+            } else if (keyboard.getSelPress() && availableScripts.length > 0) {
+                showActionMenu(availableScripts[currentScript]);
             }
         }
     }
 
-    // Check if status message should be cleared
     checkStatusClear();
-
-    // Update description scrolling animation
     updateDescriptionScroll();
-
-    // Small delay to prevent excessive CPU usage
     delay(50);
 }
