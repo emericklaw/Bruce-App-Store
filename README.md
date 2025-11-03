@@ -36,7 +36,7 @@ The installer shows different status indicators for each item:
 
 ## Installation
 
-Place the `AppStore.js` file in your Bruce device's `/scripts` directory and run it through the `JS Interpreter` menu.
+Place the `App Store.js` file in your Bruce device's `/scripts` directory and run it through the `JS Interpreter` menu.
 
 ## How to Publish Your Own App to the App Store?
 

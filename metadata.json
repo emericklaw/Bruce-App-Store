@@ -4,8 +4,8 @@
   "category": "Tools",
   "files": [
     {
-      "source": "AppStore.js",
-      "destination": "AppStore.js"
+      "source": "App Store.js",
+      "destination": "App Store.js"
     }
   ]
 }

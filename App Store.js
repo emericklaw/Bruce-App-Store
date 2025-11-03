@@ -276,7 +276,7 @@ function loadInstalledVersions() {
  */
 function saveInstalledVersions() {
     try {
-        storage.write({ fs: fileSystem, path: VERSION_FILE }, JSON.stringify(installedVersions, null, 2), 'write');
+        storage.write({ fs: fileSystem, path: VERSION_FILE }, JSON.stringify(installedVersions, null, 2), "write");
         if (!isLoadingScripts && releasesData) {
             createUpdatesCategory();
         }
@@ -590,7 +590,7 @@ function installScript(script) {
                 statusMessage = "Downloading " + (i + 1) + " of " + files.length + "...";
                 displayInterface();
 
-                if (storage.write({ fs: fileSystem, path: destPath }, response.body)) {
+                if (storage.write({ fs: fileSystem, path: destPath }, response.body, "write")) {
                     success++;
                 } else {
                     statusMessage = "Failed to write file: " + destPath;
